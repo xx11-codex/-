@@ -216,7 +216,11 @@ async function loadThree() {
       let RoomEnvironment = null;
       try { RoomEnvironment = (await import('three/addons/environments/RoomEnvironment.js')).RoomEnvironment; }
       catch (e) { console.warn('RoomEnvironment 载入失败', e); }
-      return { THREE, OrbitControls, RoomEnvironment, cdn: cdn.name };
+      const { GLTFLoader: GLTF } = await import('three/addons/loaders/GLTFLoader.js');
+      let DRACO = null;
+      try { DRACO = (await import('three/addons/loaders/DRACOLoader.js')).DRACOLoader; }
+      catch (e) { console.warn('DRACOLoader 载入失败', e); }
+      return { THREE, OrbitControls, RoomEnvironment, GLTFLoader: GLTF, DRACOLoader: DRACO, cdn: cdn.name };
     } catch (e) { lastErr = e; console.warn('CDN 尝试失败:', cdn.name, e); }
   }
   throw lastErr || new Error('all CDN failed');
@@ -232,7 +236,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 const easeInOut = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 
-let TH, OrbitControls, RoomEnvironment;
+let TH, OrbitControls, RoomEnvironment, GLTFLoader, DRACOLoader;
 
 /* ---------- 材质工厂（高光克制：roughness 中高，金属适度） ---------- */
 function mat(color, rough = 0.5, metal = 0.4) {
@@ -1320,6 +1324,7 @@ function buildCurrent() {
     return;
   }
   TH = L.THREE; OrbitControls = L.OrbitControls; RoomEnvironment = L.RoomEnvironment;
+  GLTFLoader = L.GLTFLoader; DRACOLoader = L.DRACOLoader;
   try { startApp(); }
   catch (err) {
     console.error(err);
@@ -1473,7 +1478,7 @@ function startApp() {
         [o.material, o.userData.origClay, o.userData.hovMat, o.userData.origHov, o.userData.selMat, o.userData.origSel].forEach(m => { if (m) mats.add(m); });
       }
     });
-    mats.forEach(m => m.dispose());
+    mats.forEach(m => { if (m !== CLAY) m.dispose(); });
     scene.remove(CUR.R);
     CUR.R = null;
   }
@@ -1952,7 +1957,8 @@ function startApp() {
     MATS, mat, texMat, loadTex, led, M, P, boxGeo, cylGeo, screw, screwRow, spring, gearGeo,
     mecanumWheel, fixedWheel, buildGun17, buildGun42, yawBaseAt, pitchCage, armorPanel,
     buildCurrent, renderList, renderDetail, showToast, applyBg, rebuild, switchRobot,
-    plat: { disc: platDisc, ring: ringM, grids: [gridDark, gridLight], ppts },
+    GLTFLoader, DRACOLoader,
+    plat: { disc: platDisc, ring: ring, grids: [gridDark, gridLight], ppts },
   };
 
   /* ---------- 启动 ---------- */
@@ -3276,15 +3282,9 @@ window.ExtraViews = (function () {
     if (realLoading[mode]) return;
     realLoading[mode] = true;
     R.showToast(cfg.label + ' 加载中…');
-    Promise.all([
-      import('three/addons/loaders/GLTFLoader.js'),
-      import('three/addons/loaders/DRACOLoader.js'),
-    ]).then(function (mods) {
-      var loader = new mods[0].GLTFLoader();
-      var draco = new mods[1].DRACOLoader();
-      draco.setDecoderPath('./lib/three/examples/jsm/libs/draco/');
-      loader.setDRACOLoader(draco);
-      loader.load(cfg.url, function (gltf) {
+    if (!R.GLTFLoader) { realLoading[mode] = false; realFail[mode] = new Error('GLTFLoader 未就绪'); R.showToast('场地加载失败：GLTFLoader 未就绪'); return; }
+    var loader = new R.GLTFLoader();
+    loader.load(cfg.url, function (gltf) {
         var sc = gltf.scene;
         /* cascadio 未导出 metallicFactor/roughnessFactor，glTF 默认 metallic=1 会发黑；
            且场景强光+白色材质易过曝发白。改用不受光的基础材质，精确复现官方红/蓝/白配色 */
@@ -3295,7 +3295,10 @@ window.ExtraViews = (function () {
             var m = mats[i];
             if (!m) continue;
             if (m.isMeshStandardMaterial) {
-              var nm = new TH.MeshBasicMaterial({ color: m.color.clone() });
+              var c = m.color.clone();
+              var lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b; // ITU-R BT.709 亮度
+              if (lum < 0.06) c.setRGB(0.10, 0.11, 0.13);            // 仅抬升近黑地板，避免深色背景下不可见
+              var nm = new TH.MeshBasicMaterial({ color: c });
               nm.side = TH.DoubleSide;
               if (Array.isArray(o.material)) o.material[i] = nm; else o.material = nm;
             } else if (m.isMeshBasicMaterial) {
@@ -3312,7 +3315,6 @@ window.ExtraViews = (function () {
         realLoading[mode] = false; realFail[mode] = e;
         if (cur === mode) { buildReal(mode); }
       });
-    }).catch(function (e) { realLoading[mode] = false; realFail[mode] = e; if (cur === mode) { buildReal(mode); } });
   }
 
   /* ---------- 地面图标（Canvas 贴花） ---------- */
@@ -3683,35 +3685,36 @@ window.ExtraViews = (function () {
       };
       if (!failMsg && !loading) {
         loading = true;
-        Promise.all([
-          import('three/addons/loaders/GLTFLoader.js'),
-          import('three/addons/loaders/DRACOLoader.js'),
-        ]).then(function (mods) {
-          var loader = new mods[0].GLTFLoader();
-          var draco = new mods[1].DRACOLoader();
-          draco.setDecoderPath('./lib/three/examples/jsm/libs/draco/');
-          loader.setDRACOLoader(draco);
-          loader.load(GLB_URL, function (gltf) {
-            /* 零件名：node 名为 NAUO 内部名，mesh 定义名才是中文零件名 → 回填 */
-            try {
-              gltf.scene.traverse(function (o) {
-                if (!o.isMesh) return;
-                var as = gltf.parser.associations.get(o);
-                if (as && as.meshes !== undefined) {
-                  var mn = gltf.parser.json.meshes[as.meshes].name;
-                  if (mn) o.name = mn;
-                }
-              });
-            } catch (e) { console.warn('qdu names', e); }
-            cache = gltf.scene; loading = false;
-            if (R.CUR.root === 'qdu') R.rebuild();
-            if (R.showToast) R.showToast('青岛大学未来战队整车模型加载完成');
-          }, undefined, function (err) {
-            console.warn('qdu glb', err); loading = false;
-            failMsg = 'GLB 加载失败：' + ((err && err.message) || err);
-            if (R.CUR.root === 'qdu') R.rebuild();
-          });
-        }).catch(function (e) { loading = false; failMsg = 'GLTFLoader 加载失败：' + e.message; });
+        if (!R.GLTFLoader || !R.DRACOLoader) {
+          loading = false;
+          failMsg = '3D 加载器未就绪（GLTFLoader/DRACOLoader 预载失败）';
+          R.rebuild();
+          return;
+        }
+        var loader = new R.GLTFLoader();
+        var draco = new R.DRACOLoader();
+        draco.setDecoderPath('./lib/three/examples/jsm/libs/draco/');
+        loader.setDRACOLoader(draco);
+        loader.load(GLB_URL, function (gltf) {
+          /* 零件名：node 名为 NAUO 内部名，mesh 定义名才是中文零件名 → 回填 */
+          try {
+            gltf.scene.traverse(function (o) {
+              if (!o.isMesh) return;
+              var as = gltf.parser.associations.get(o);
+              if (as && as.meshes !== undefined) {
+                var mn = gltf.parser.json.meshes[as.meshes].name;
+                if (mn) o.name = mn;
+              }
+            });
+          } catch (e) { console.warn('qdu names', e); }
+          cache = gltf.scene; loading = false;
+          if (R.CUR.root === 'qdu') R.rebuild();
+          if (R.showToast) R.showToast('青岛大学未来战队整车模型加载完成');
+        }, undefined, function (err) {
+          console.warn('qdu glb', err); loading = false;
+          failMsg = 'GLB 加载失败：' + ((err && err.message) || err);
+          if (R.CUR.root === 'qdu') R.rebuild();
+        });
       }
       return;
     }
@@ -4038,31 +4041,30 @@ window.ExtraViews = (function () {
 
   function parseMesh(buf, ext) {
     if (ext === 'glb' || ext === 'gltf') {
-      return Promise.all([
-        import('three/addons/loaders/GLTFLoader.js'),
-        import('three/addons/loaders/DRACOLoader.js'),
-      ]).then(function (mods) {
-        var loader = new mods[0].GLTFLoader();
-        var draco = new mods[1].DRACOLoader();
+      var R = rm();
+      if (!R.GLTFLoader) return Promise.reject(new Error('GLTFLoader 未就绪'));
+      var loader = new R.GLTFLoader();
+      if (R.DRACOLoader) {
+        var draco = new R.DRACOLoader();
         draco.setDecoderPath('./lib/three/examples/jsm/libs/draco/');
         loader.setDRACOLoader(draco);
-        return new Promise(function (res, rej) {
-          /* .gltf 是 JSON 文本，.glb 是二进制 */
-          var data = (ext === 'gltf') ? new TextDecoder().decode(buf) : buf;
-          loader.parse(data, '', function (gltf) {
-            try {
-              gltf.scene.traverse(function (o) {
-                if (!o.isMesh) return;
-                var as = gltf.parser.associations && gltf.parser.associations.get(o);
-                if (as && as.meshes !== undefined) {
-                  var mn = gltf.parser.json.meshes[as.meshes].name;
-                  if (mn) o.name = mn;
-                }
-              });
-            } catch (e) { /* 无 associations 时忽略 */ }
-            res(gltf.scene);
-          }, rej);
-        });
+      }
+      return new Promise(function (res, rej) {
+        /* .gltf 是 JSON 文本，.glb 是二进制 */
+        var data = (ext === 'gltf') ? new TextDecoder().decode(buf) : buf;
+        loader.parse(data, '', function (gltf) {
+          try {
+            gltf.scene.traverse(function (o) {
+              if (!o.isMesh) return;
+              var as = gltf.parser.associations && gltf.parser.associations.get(o);
+              if (as && as.meshes !== undefined) {
+                var mn = gltf.parser.json.meshes[as.meshes].name;
+                if (mn) o.name = mn;
+              }
+            });
+          } catch (e) { /* 无 associations 时忽略 */ }
+          res(gltf.scene);
+        }, rej);
       });
     }
     if (ext === 'obj') {
