@@ -693,7 +693,7 @@ const PKEY = {};
 const CUR = {
   root: 'infantry', R: null, parts: [], partById: {},
   wheels: [], gimbalYaw: null, gimbalPitch: null, recoilGs: [],
-  fricWheels: [], feederDiscs: [], radars: [], muzzles: [], tracers: [],
+  fricWheels: [], feederDiscs: [], radars: [], muzzles: [], tracers: [], projectiles: null,
   leds: [], teamColor: '#ff4d5e',
   mode: 'idle', explodeCur: 0, explodeTarget: 0,
   heat: 0, overheat: false, shotTimer: 0, shotIdx: 0, flashAge: 0,
@@ -739,6 +739,7 @@ function muzzleFlash(parent, x, y, z, size = 1) {
   const sph = new TH.Mesh(new TH.SphereGeometry(0.026 * size, 8, 8), fm);
   sph.position.y = 0.02 * size;
   cone.userData.fx = true; sph.userData.fx = true;
+  cone.visible = false; sph.visible = false;   /* 关闭火光，发射视觉交由弹丸呈现 */
   g.add(cone, sph);
   const light = new TH.PointLight('#ffb347', 0, 4, 1.6);
   g.add(light);
@@ -748,14 +749,16 @@ function muzzleFlash(parent, x, y, z, size = 1) {
   parent.add(g);
   return { flash: g, fm, light, tracerOrig };
 }
-function makeTracers(n = 10, r = 0.007) {
+function makeTracers(n = 14) {
   const list = [];
-  const geo = new TH.CylinderGeometry(r, r, 0.5, 6);
-  geo.rotateX(Math.PI / 2);
+  /* 弹丸：单位球体，发射时按口径缩放，突出口径对应弹丸（非火光）；挂入 projectiles 层以世界坐标飞行 */
+  const geo = new TH.SphereGeometry(1, 12, 10);
   for (let i = 0; i < n; i++) {
-    const m = new TH.Mesh(geo, new TH.MeshBasicMaterial({ color: '#ffd76e', transparent: true, opacity: 0, blending: TH.AdditiveBlending, depthWrite: false }));
+    const m = new TH.Mesh(geo, new TH.MeshStandardMaterial({ color: '#7cff9b', roughness: 0.32, metalness: 0.12, emissive: new TH.Color('#2cff88'), emissiveIntensity: 0.7 }));
     m.visible = false;
-    m.userData = { life: 0, vel: new TH.Vector3(), fx: true };
+    m.scale.setScalar(0.026);
+    m.userData = { life: 0, vel: new TH.Vector3(), spin: new TH.Vector3(0, 0, 0), radius: 0.026, fx: true };
+    if (CUR.projectiles) CUR.projectiles.add(m);
     CUR.tracers.push(m);
     list.push(m);
   }
@@ -1299,7 +1302,7 @@ function buildCurrent() {
   /* 结构细化钩子（排线 / 航插 / 灯带 / 电容等，由扩展片段注册） */
   if (window.__RMDetail) { try { window.__RMDetail(CUR.root); } catch (e) { console.warn('detail', e); } }
   CUR.parts.forEach(p => { p.userData.basePos = p.position.clone(); });
-  makeTracers(14, CUR.root === 'heavy' ? 0.02 : 0.007);
+  makeTracers(14);
 }
 /* ================================================================
    场景 / 交互 / 动画主循环
@@ -1454,6 +1457,7 @@ function startApp() {
     CUR.parts = []; CUR.partById = {}; CUR.wheels = []; CUR.gimbalYaw = null;
     CUR.gimbalPitch = null; CUR.recoilGs = []; CUR.fricWheels = []; CUR.feederDiscs = [];
     CUR.radars = []; CUR.muzzles = []; CUR.tracers = []; CUR.leds = []; CUR.decals = [];
+    if (CUR.projectiles) { CUR.projectiles.children.slice().forEach(m => { if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); }); CUR.projectiles.clear(); }
     CUR.heat = 0; CUR.shotTimer = 0.1; CUR.shotIdx = 0; CUR.overheat = false;
     CUR.sel = null; CUR.selPinned = false; CUR.selBoost = 0; selPulse = 0;
   }
@@ -1594,6 +1598,31 @@ function startApp() {
     showToast('聚焦部件：' + (p.userData.data ? p.userData.data.name : p.name));
   }
 
+  /* ---------- 零件改色 ---------- */
+  const PRESET_COLORS = ['#ff7a1a', '#37e0b0', '#2fd0ff', '#ff5c6c', '#ffd020', '#8b95ff', '#4d7dff', '#f2f4f8'];
+  function applyPartColor(p, hex) {
+    if (!p) return;
+    p.traverse(o => {
+      if (!o.isMesh || o.userData.fx || o.userData.decal) return;
+      /* 化解当前高亮 / 悬停 / 白模，回到基础材质 */
+      let base = o.material;
+      if (o.userData.selMat && o.material === o.userData.selMat) base = o.userData.origSel;
+      else if (o.userData.hovMat && o.material === o.userData.hovMat) base = o.userData.origHov;
+      else if (o.userData.origClay && o.material === CLAY) base = o.userData.origClay;
+      if (!base) return;
+      /* 克隆独立材质，避免共享材质被全局改色 */
+      const m = base.clone ? base.clone() : base;
+      if (m.color) m.color.set(hex);
+      if (m.emissive) { m.emissive.set('#000000'); m.emissiveIntensity = 0; }
+      o.material = m;
+      o.userData.selMat = null; o.userData.origSel = null;
+      o.userData.hovMat = null; o.userData.origHov = null;
+      o.userData.origClay = null;
+    });
+    if (p.userData.data) p.userData.data.color = hex;
+    if (CUR.sel === p) { const keep = CUR.sel; CUR.sel = null; selectPart(keep); }
+  }
+
   /* ---------- 射击 ---------- */
   function shoot() {
     const r = ROBOTS[CUR.root].rules;
@@ -1606,22 +1635,27 @@ function startApp() {
     CUR.heat += r.perShot;
     const i = CUR.shotIdx++ % CUR.muzzles.length;
     const mz = CUR.muzzles[i];
-    mz.flash.visible = true;
-    mz.flash.scale.setScalar(0.85 + Math.random() * 0.45);
-    mz.flash.rotation.z = Math.random() * Math.PI * 2;
-    mz.light.intensity = CUR.root === 'heavy' ? 70 : 25;
-    mz._t = 0.06 + Math.random() * 0.025;
+    mz.flash.visible = true;   /* 仅点亮枪口补光（火焰已关闭），发射视觉由弹丸呈现 */
+    mz.light.intensity = CUR.root === 'heavy' ? 55 : 20;
+    mz._t = 0.05 + Math.random() * 0.02;
     CUR.recoilGs.forEach(g => { g.cur = g.max; });
     if (CUR.root === 'heavy') camShake = 1;
     const tr = CUR.tracers.find(x => x.userData.life <= 0);
     if (tr) {
+      const isHeavy = r.cal === '42mm';
+      const rad = isHeavy ? 0.055 : 0.026;
       const q = new TH.Quaternion();
       mz.tracerOrig.getWorldPosition(tr.position);
       mz.tracerOrig.getWorldQuaternion(q);
-      tr.userData.vel.copy(new TH.Vector3(0, 0, 1).applyQuaternion(q)).multiplyScalar(CUR.root === 'heavy' ? 24 : 40);
-      tr.userData.life = 0.34;
+      tr.scale.setScalar(rad);
+      tr.userData.radius = rad;
+      tr.material.color.set(isHeavy ? '#ffb84d' : '#7cff9b');
+      tr.material.emissive.set(isHeavy ? '#ff8a1a' : '#2cff88');
+      tr.userData.vel.copy(new TH.Vector3(0, 0, 1).applyQuaternion(q)).multiplyScalar(isHeavy ? 11 : 14);
+      tr.userData.spin.set(0, 0, isHeavy ? -8 : -14);
+      tr.userData.life = isHeavy ? 0.85 : 0.7;
       tr.visible = true;
-      tr.material.opacity = 0.95;
+      tr.rotation.set(0, 0, 0);
     }
   }
 
@@ -1745,12 +1779,19 @@ function startApp() {
       cases.forEach(c => { html += mkSchool(c); });
       html += '</div>';
     }
+    html += '<div class="sec"><h4>◆ 零件颜色</h4><div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center">' +
+      PRESET_COLORS.map(c => '<span class="pcol" data-c="' + c + '" style="width:24px;height:24px;border-radius:6px;background:' + c + ';cursor:pointer;border:2px solid ' + (data.color === c.toUpperCase() || data.color === c ? 'rgba(255,255,255,.9)' : 'rgba(255,255,255,.15)') + '"></span>').join('') +
+      '<label style="font-size:11px;color:var(--dim);margin-left:4px;cursor:pointer;display:inline-flex;align-items:center;gap:5px">自选<input type="color" id="dColor" value="' + (data.color || '#f2f4f8') + '" style="width:32px;height:26px;border:1px solid rgba(120,180,255,.25);border-radius:6px;background:none;cursor:pointer;padding:0"></label>' +
+      '</div></div>';
     html += '<div class="dbtns">';
     html += '<button class="dbtn warn" id="dExp">' + (CUR.selPinned ? '收回部件' : '拆解此部件') + '</button>';
     html += '<button class="dbtn" id="dFocus">聚焦部件</button>';
     html += '<button class="dbtn ghost" id="dReset">复位拆解</button>';
     html += '</div>';
     d.innerHTML = html;
+    $$('#detp .pcol').forEach(s => s.addEventListener('click', () => applyPartColor(CUR.sel, s.getAttribute('data-c'))));
+    const _dc = $('#dColor');
+    if (_dc) _dc.addEventListener('input', e => applyPartColor(CUR.sel, e.target.value));
     $('#dExp').addEventListener('click', () => {
       CUR.selPinned = !CUR.selPinned;
       if (CUR.selPinned) showToast('已拆解：' + data.name);
@@ -1817,8 +1858,9 @@ function startApp() {
     CUR.tracers.forEach(tr => {
       if (tr.userData.life > 0) {
         tr.userData.life -= dt;
+        tr.userData.vel.y -= 5.0 * dt;      /* 弹道下坠弧线 */
         tr.position.addScaledVector(tr.userData.vel, dt);
-        tr.material.opacity = 0.95 * Math.min(1, tr.userData.life / 0.12);
+        tr.rotation.z += tr.userData.spin.z * dt;
         if (tr.userData.life <= 0) tr.visible = false;
       }
     });
@@ -1842,14 +1884,23 @@ function startApp() {
     CUR.recoilGs.forEach(g => { g.cur *= Math.exp(-dt * 16); g.g.position.z = -g.cur; });
     const Rg = CUR.R;
     if (CUR.mode === 'move') {
-      Rg.position.x = Math.sin(t * 0.7) * 0.32;
-      Rg.position.z = Math.cos(t * 0.7) * 0.32;
-      Rg.position.y = Math.abs(Math.sin(t * 9)) * 0.009;
-      Rg.rotation.z = Math.sin(t * 6) * 0.02;
+      /* 8 字形轨迹 + 幅度呼吸，车身俯仰/侧倾并始终朝向运动切线方向 */
+      const u = t * 0.75;
+      const A = 0.44 * (1 + 0.14 * Math.sin(t * 1.3));
+      const px = Math.sin(u) * A;
+      const pz = Math.sin(u) * Math.cos(u) * 0.55;
+      Rg.position.x = px;
+      Rg.position.z = pz;
+      Rg.position.y = 0.012 + Math.abs(Math.sin(t * 7.5)) * 0.014;
+      Rg.rotation.y = Math.atan2(Math.cos(u) * A, (Math.cos(u) * Math.cos(u) - Math.sin(u) * Math.sin(u)) * 0.55);
+      Rg.rotation.x = Math.sin(t * 3.3) * 0.03;    /* 俯仰 */
+      Rg.rotation.z = Math.sin(t * 5.2) * 0.035;   /* 侧倾 */
     } else {
       Rg.position.x = lerp(Rg.position.x, 0, 1 - Math.exp(-4 * dt));
       Rg.position.z = lerp(Rg.position.z, 0, 1 - Math.exp(-4 * dt));
       Rg.position.y = lerp(Rg.position.y, 0, 1 - Math.exp(-4 * dt));
+      Rg.rotation.x = lerp(Rg.rotation.x, 0, 1 - Math.exp(-4 * dt));
+      Rg.rotation.y = lerp(Rg.rotation.y, 0, 1 - Math.exp(-4 * dt));
       Rg.rotation.z = lerp(Rg.rotation.z, 0, 1 - Math.exp(-4 * dt));
     }
     CUR.leds.forEach((Lm, i) => { Lm.m.emissiveIntensity = Lm.base * (0.6 + 0.4 * Math.sin(t * 3.2 + i * 1.7)); });
@@ -1904,6 +1955,8 @@ function startApp() {
   /* ---------- 启动 ---------- */
   CUR.R = new TH.Group();
   scene.add(CUR.R);
+  CUR.projectiles = new TH.Group();
+  scene.add(CUR.projectiles);
   buildCurrent();
   renderList();
   renderDetail(null);
