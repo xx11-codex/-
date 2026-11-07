@@ -116,6 +116,17 @@ canvas{display:block}
   background:rgba(14,18,26,.9);border:1px solid var(--line);color:var(--txt);font-size:12.5px;letter-spacing:.06em;
   z-index:30;opacity:0;transition:all .3s;pointer-events:none;white-space:nowrap}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#announce{position:absolute;top:74px;left:50%;transform:translateX(-50%);max-width:540px;
+  padding:11px 36px 11px 16px;background:var(--panel);border:1px solid rgba(255,122,26,.4);border-radius:12px;
+  z-index:24;box-shadow:0 8px 30px rgba(0,0,0,.5);display:none;
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+#announce.show{display:block;animation:ann-in .4s ease}
+#announce .ann-t{font-size:12.5px;color:#ffd9b0;line-height:1.6}
+#announce .ann-e{font-size:11px;color:var(--acc);margin-top:4px;user-select:text}
+#announce .ann-x{position:absolute;top:6px;right:8px;background:none;border:none;color:var(--dim);
+  font-size:16px;line-height:1;cursor:pointer;padding:2px 6px;font-family:inherit}
+#announce .ann-x:hover{color:#fff}
+@keyframes ann-in{from{opacity:0;transform:translate(-50%,-8px)}to{opacity:1;transform:translate(-50%,0)}}
 #loader{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;
   gap:18px;z-index:99;transition:opacity .5s}
 #loader .spin{width:42px;height:42px;border:3px solid rgba(47,208,255,.2);border-top-color:var(--acc);
@@ -177,6 +188,11 @@ canvas{display:block}
 
 <div id="hint">拖拽旋转 · 滚轮缩放 · 点击部件查看详情与拆解</div>
 <div id="toast"></div>
+<div id="announce">
+  <div class="ann-t">尚在开发，模型首次加载需较长时间。</div>
+  <div class="ann-e">优化建议投递：xyhxyh2007zzz@163.com</div>
+  <button class="ann-x" aria-label="关闭">×</button>
+</div>
 
 <div id="loader">
   <div class="spin"></div>
@@ -1972,6 +1988,12 @@ function startApp() {
   applyBg(true);
   setTimeout(() => { explodeAnim = { t: 0, dur: 3.4 }; }, 900);
   setTimeout(() => { const h = $('#hint'); if (h) h.style.opacity = 0; }, 9000);
+  const ann = $('#announce');
+  if (ann) {
+    setTimeout(() => ann.classList.add('show'), 350);
+    const annX = ann.querySelector('.ann-x');
+    if (annX) annX.addEventListener('click', () => { ann.classList.remove('show'); ann.style.display = 'none'; });
+  }
   $('#loader').style.opacity = '0';
   setTimeout(() => { const ld = $('#loader'); if (ld) ld.style.display = 'none'; }, 600);
 }
