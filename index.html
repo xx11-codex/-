@@ -3679,11 +3679,37 @@ window.ExtraViews = (function () {
      把任意 Object3D 转成「可点选零件 + 爆炸拆解 + 零件树」结构：
      归一化尺寸与落地 → 逐 mesh 包装成 P() 零件组 → 按名称分类 → 回填模块树
      opt = { robot, idPrefix, school, descPrefix, cadUp, tint, pros, done } */
+  /* 按几何自动转正（根源解决侧立）：车辆 / 机甲 / 机械件站好时，
+     竖直方向（高度）通常是包围盒最短的轴。把最短轴转到世界 Y（朝上）。
+     不再按文件扩展名猜测坐标系，Z-up 与 Y-up 的 STEP / GLB / OBJ / STL 都适用。 */
+  function autoOrient(R, src) {
+    var TH = R.TH;
+    var bbox = new TH.Box3().setFromObject(src);
+    var size = bbox.getSize(new TH.Vector3());
+    var sx = size.x, sy = size.y, sz = size.z;
+    var min = Math.min(sx, sy, sz);
+    var eps = min * 0.02 + 1e-9;
+    if (sx < sy - eps && sx < sz - eps) {        /* X 最短 → 绕 Z +90°，把 X 立到 Y */
+      src.rotation.z = Math.PI / 2;
+    } else if (sz < sx - eps && sz < sy - eps) { /* Z 最短 → 绕 X -90°，把 Z 立到 Y */
+      src.rotation.x = -Math.PI / 2;
+    }
+    /* 否则 Y 最短或三轴接近相等 → 保持不动 */
+  }
+
   function mountModel(R, src0, opt) {
     var TH = R.TH, CUR = R.CUR;
     var src = src0.clone(true);
-    /* STEP / IGES（CAD）为 Z 轴向上，Three.js 为 Y 轴向上 → 绕 X 轴 -90° 转正，否则整车侧立 */
-    if (opt.cadUp) src.rotation.x = -Math.PI / 2;
+    src.updateMatrixWorld(true);
+    if (opt.cadUp) {
+      /* 确定 Z-up（STEP / IGES / 整车 GLB）：绕 X -90° 转正 */
+      src.rotation.x = -Math.PI / 2;
+    } else {
+      /* 坐标系未知（GLB / OBJ / STL）：按几何最短轴自动转正 */
+      autoOrient(R, src);
+    }
+    if (opt.extraRotX) src.rotation.x += opt.extraRotX;  /* 用户手动纠偏（绕 X） */
+    src.rotation.z += (opt.extraRotZ || 0);
     src.updateMatrixWorld(true);
     var bbox = new TH.Box3().setFromObject(src);
     var size = bbox.getSize(new TH.Vector3());
@@ -3889,8 +3915,26 @@ window.ExtraViews = (function () {
   function renderBar() {
     bar.innerHTML = '<span class="fn">' + esc(state.name) + '</span>' +
       '<span class="tip">' + (state.parts || 0) + ' 个零件 · 拖「爆炸拆解」逐件散开</span>' +
-      '<button type="button">更换文件</button>';
-    bar.querySelector('button').addEventListener('click', function () { input.click(); });
+      '<button type="button" data-act="rx">↻ 摆正(+X)</button>' +
+      '<button type="button" data-act="rz">摆正(+Z)</button>' +
+      '<button type="button" data-act="re">更换文件</button>';
+    bar.querySelectorAll('button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var a = b.getAttribute('data-act');
+        if (a === 'rx') rotate('x');
+        else if (a === 'rz') rotate('z');
+        else input.click();
+      });
+    });
+  }
+
+  function rotate(axis) {
+    var R = rm(); if (!R) return;
+    var half = Math.PI / 2;
+    if (axis === 'x') state.extraRotX = ((state.extraRotX || 0) + half) % (Math.PI * 2);
+    else state.extraRotZ = ((state.extraRotZ || 0) + half) % (Math.PI * 2);
+    R.rebuild();
+    setTimeout(sync, 30);
   }
 
   /* ---------------- 解析 ---------------- */
@@ -4022,6 +4066,8 @@ window.ExtraViews = (function () {
         done: function (n) { state.parts = n; },
       };
       state.loading = false;
+      state.extraRotX = 0;
+      state.extraRotZ = 0;
       R.ROBOTS.import.intro = '已导入「' + file.name + '」（' + fmtSize(file.size) + '）：每个零件独立可点选，拖「爆炸拆解」滑杆可逐件散开，点击零件查看面数与包围盒尺寸。';
       if (R.CUR.root !== 'import') R.switchRobot('import'); else R.rebuild();
       setTimeout(function () { sync(); }, 60);
@@ -4042,7 +4088,10 @@ window.ExtraViews = (function () {
     var R = rm(); if (!R) return;
     if (!state.parsed) return;          /* 空场景 + 拖拽区 */
     if (!window.__RMCAD) return;
-    window.__RMCAD.mount(R, state.parsed, state.opts);
+    var opts = state.opts;
+    opts.extraRotX = state.extraRotX || 0;
+    opts.extraRotZ = state.extraRotZ || 0;
+    window.__RMCAD.mount(R, state.parsed, opts);
   }
   window.__RMImport = { build: build };
 
