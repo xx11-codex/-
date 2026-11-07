@@ -3912,6 +3912,11 @@ window.ExtraViews = (function () {
     '#impdrop button{padding:9px 22px;border-radius:9px;border:1px solid var(--acc);cursor:pointer;font-family:inherit;',
     'font-size:12.5px;letter-spacing:.1em;color:#04121a;background:linear-gradient(180deg,#5fdcff,#2fd0ff);font-weight:600}',
     '#impdrop button:hover{filter:brightness(1.12)}',
+    '#impdrop .pbar{display:none;height:6px;margin:12px auto 0;max-width:400px;background:rgba(120,180,255,.16);border-radius:3px;overflow:hidden}',
+    '#impdrop .pbar.on{display:block}',
+    '#impdrop .pbar-fill{height:100%;width:0%;background:linear-gradient(90deg,#2fd0ff,#7fe6ff);transition:width .18s ease}',
+    '#impdrop .pbar.indet .pbar-fill{width:100% !important;transform-origin:0 50%;animation:pbar-indet 1.1s ease-in-out infinite}',
+    '@keyframes pbar-indet{0%{transform:translateX(-100%)}100%{transform:translateX(240%)}}',
     '#impdrop .st{margin-top:12px;font-size:11.5px;color:#ffd08a;min-height:17px;line-height:1.6}',
     '#impbar{position:absolute;left:50%;transform:translateX(-50%);bottom:76px;z-index:17;display:none;',
     'align-items:center;gap:10px;padding:7px 10px 7px 14px;font-size:11.5px;color:#cfe0f2;max-width:88vw}',
@@ -3933,6 +3938,7 @@ window.ExtraViews = (function () {
       '<p>把文件拖到页面任意位置，或点击下方按钮选择<br>文件不会上传，全部在本机解析</p>' +
       '<div class="fmts"><span>STEP</span><span>IGES</span><span>GLB</span><span>GLTF</span><span>OBJ</span><span>STL</span></div>' +
       '<button type="button">选择文件</button>' +
+      '<div class="pbar"><div class="pbar-fill"></div></div>' +
       '<div class="st"></div>' +
     '</div>';
   document.body.appendChild(drop);
@@ -3957,6 +3963,37 @@ window.ExtraViews = (function () {
   function extOf(n) { var m = /\.([a-z0-9]+)$/i.exec(n || ''); return m ? m[1].toLowerCase() : ''; }
   function fmtSize(b) { return b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1024).toFixed(0) + ' KB'; }
   function setStatus(t) { var s = drop.querySelector('.st'); if (s) s.textContent = t || ''; }
+
+  /* 读取文件并报告真实字节进度（大文件读取耗时，需要进度反馈） */
+  function readFile(file, onProgress) {
+    return new Promise(function (res, rej) {
+      var r = new FileReader();
+      r.onprogress = function (e) { if (onProgress) onProgress(e.lengthComputable ? (e.loaded / e.total) : -1); };
+      r.onload = function () { res(r.result); };
+      r.onerror = function () { rej(new Error('文件读取失败')); };
+      r.readAsArrayBuffer(file);
+    });
+  }
+
+  /* pct: 0~100 确定进度；<0 表示不确定（引擎初始化 / 解析阶段无细粒度进度，用动画） */
+  function setProgress(pct) {
+    var pb = drop.querySelector('.pbar'); if (!pb) return;
+    var fill = pb.querySelector('.pbar-fill');
+    pb.classList.add('on');
+    if (pct < 0) {
+      pb.classList.add('indet');
+      if (fill) fill.style.width = '100%';
+    } else {
+      pb.classList.remove('indet');
+      if (fill) fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    }
+  }
+  function clearProgress() {
+    var pb = drop.querySelector('.pbar'); if (!pb) return;
+    pb.classList.remove('on', 'indet');
+    var fill = pb.querySelector('.pbar-fill');
+    if (fill) fill.style.width = '0%';
+  }
 
   function sync() {
     var R = rm(); if (!R) return;
@@ -4112,11 +4149,16 @@ window.ExtraViews = (function () {
     }
     if (R.CUR.root !== 'import') R.switchRobot('import');
     setTimeout(sync, 20);
-    setStatus('正在解析 ' + file.name + '（' + fmtSize(file.size) + '）…');
+    setProgress(0);
+    setStatus('正在读取 ' + file.name + '（' + fmtSize(file.size) + '）…');
     if (file.size > 120 * 1048576 && /step|stp|iges|igs/.test(ext)) {
       setStatus('文件较大，浏览器端解析可能失败（建议 STEP < 50MB）…');
     }
-    file.arrayBuffer().then(function (buf) {
+    readFile(file, function (p) {
+      if (p < 0) setProgress(-1);
+      else { setProgress(p * 100); setStatus('正在读取文件… ' + Math.round(p * 100) + '%'); }
+    }).then(function (buf) {
+      setProgress(-1); /* 进入解析阶段，无细粒度进度 → 不确定动画 */
       return (ext === 'step' || ext === 'stp' || ext === 'iges' || ext === 'igs')
         ? parseCAD(buf, ext) : parseMesh(buf, ext);
     }).then(function (obj) {
@@ -4138,9 +4180,11 @@ window.ExtraViews = (function () {
       if (R.CUR.root !== 'import') R.switchRobot('import'); else R.rebuild();
       setTimeout(function () { sync(); }, 60);
       if (R.showToast) R.showToast('已导入：' + file.name);
+      clearProgress();
       setStatus('');
     }).catch(function (err) {
       state.loading = false;
+      clearProgress();
       console.warn('import', err);
       var msg = '解析失败：' + ((err && err.message) || err);
       if (R.CUR.root !== 'import') R.switchRobot('import');
