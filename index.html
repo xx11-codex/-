@@ -3893,7 +3893,7 @@ window.ExtraViews = (function () {
 (function () {
   function rm() { return window.__RM; }
   var state = { parsed: null, opts: null, name: '', parts: 0, loading: false };
-  var occtP = null;
+  var occtP = null, occtInst = null;
 
   /* ---------------- 样式 ---------------- */
   var st = document.createElement('style');
@@ -4009,11 +4009,20 @@ window.ExtraViews = (function () {
     return occtP;
   }
 
-  function parseCAD(buf, ext) {
-    setStatus('正在载入 STEP / IGES 解析引擎（7.6MB，首次较慢）…');
+  /* 缓存已实例化的 OCCT 引擎：首次导入完成 wasm 编译后复用之，后续导入 STEP/IGES 不再重复初始化 */
+  function getOcct() {
+    if (occtInst) return Promise.resolve(occtInst);
     return loadOcct().then(function (factory) {
       return factory({ locateFile: function (f) { return './lib/occt/' + f; } });
     }).then(function (occt) {
+      occtInst = occt;
+      return occt;
+    });
+  }
+
+  function parseCAD(buf, ext) {
+    setStatus('正在载入 STEP / IGES 解析引擎（7.6MB，首次较慢）…');
+    return getOcct().then(function (occt) {
       setStatus('正在解析几何体，请稍候…');
       var data = new Uint8Array(buf);
       var res = (ext === 'iges' || ext === 'igs') ? occt.ReadIgesFile(data, null) : occt.ReadStepFile(data, null);
