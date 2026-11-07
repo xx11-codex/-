@@ -3893,7 +3893,7 @@ window.ExtraViews = (function () {
 (function () {
   function rm() { return window.__RM; }
   var state = { parsed: null, opts: null, name: '', parts: 0, loading: false };
-  var occtP = null, occtInst = null;
+  var cadWorker = null, cadJobs = {}, cadJobId = 0;
 
   /* ---------------- 样式 ---------------- */
   var st = document.createElement('style');
@@ -4033,54 +4033,100 @@ window.ExtraViews = (function () {
   }
 
   /* ---------------- 解析 ---------------- */
-  function loadOcct() {
-    if (window.occtimportjs) return Promise.resolve(window.occtimportjs);
-    if (occtP) return occtP;
-    occtP = new Promise(function (res, rej) {
-      var s = document.createElement('script');
-      s.src = './lib/occt/occt-import-js.js';
-      s.onload = function () { window.occtimportjs ? res(window.occtimportjs) : rej(new Error('occt-import-js 未导出')); };
-      s.onerror = function () { rej(new Error('occt-import-js.js 加载失败')); };
-      document.head.appendChild(s);
-    });
-    return occtP;
+  /* OCCT 解析工作线程源码：在后台线程加载引擎 + 解析 STEP/IGES，主线程只接收纯几何数据，界面不再卡死 */
+  var CAD_WORKER_SRC = '' +
+    'var O = null;' +
+    'self.onmessage = function (e) {' +
+    '  var d = e.data;' +
+    '  function fail(s) { self.postMessage({ id: d.id, error: s }); }' +
+    '  if (!O) {' +
+    '    try { importScripts(d.occtBase + "occt-import-js.js"); }' +
+    '    catch (err) { return fail("OCCT 引擎加载失败：" + err.message); }' +
+    '    var factory = self.occtimportjs;' +
+    '    if (!factory) return fail("OCCT 引擎未导出");' +
+    '    O = factory({ locateFile: function (f) { return d.occtBase + f; } });' +
+    '  }' +
+    '  O.then(function (occt) {' +
+    '    var data = new Uint8Array(d.buf);' +
+    '    var res = (d.ext === "iges" || d.ext === "igs") ? occt.ReadIgesFile(data, null) : occt.ReadStepFile(data, null);' +
+    '    if (!res || !res.success) return fail("OCC 解析失败（文件过大或几何异常）");' +
+    '    var meshes = []; var transfers = [];' +
+    '    (res.meshes || []).forEach(function (m, i) {' +
+    '      var pos = m.attributes && m.attributes.position;' +
+    '      if (!pos) return;' +
+    '      var pa = (pos.array instanceof Float32Array) ? pos.array : new Float32Array(pos.array);' +
+    '      var out = { name: m.name || ("零件 " + (i + 1)), position: pa.buffer };' +
+    '      transfers.push(out.position);' +
+    '      if (m.attributes && m.attributes.normal) {' +
+    '        var na = (m.attributes.normal.array instanceof Float32Array) ? m.attributes.normal.array : new Float32Array(m.attributes.normal.array);' +
+    '        out.normal = na.buffer; transfers.push(out.normal);' +
+    '      }' +
+    '      if (m.index && m.index.array) {' +
+    '        var ia = (m.index.array instanceof Uint32Array) ? m.index.array : new Uint32Array(m.index.array);' +
+    '        out.index = ia.buffer; transfers.push(out.index);' +
+    '      }' +
+    '      meshes.push(out);' +
+    '    });' +
+    '    if (!meshes.length) return fail("解析结果为空（没有可显示的面）");' +
+    '    self.postMessage({ id: d.id, meshes: meshes }, transfers);' +
+    '  }).catch(function (err) { fail("OCCT 引擎初始化失败：" + err.message); });' +
+    '};';
+
+  function getCadWorker() {
+    if (cadWorker) return cadWorker;
+    var blob = new Blob([CAD_WORKER_SRC], { type: 'text/javascript' });
+    cadWorker = new Worker(URL.createObjectURL(blob));
+    cadWorker.onmessage = function (e) {
+      var d = e.data;
+      if (!d || !cadJobs[d.id]) return;
+      var job = cadJobs[d.id];
+      delete cadJobs[d.id];
+      if (d.error) { job.reject(new Error(d.error)); return; }
+      setStatus('正在装配模型，请稍候…');
+      var root = buildGroupFromMeshes(d.meshes, rm().TH);
+      if (!root.children.length) { job.reject(new Error('解析结果为空（没有可显示的面）')); return; }
+      job.resolve(root);
+    };
+    cadWorker.onerror = function () {
+      Object.keys(cadJobs).forEach(function (k) {
+        cadJobs[k].reject(new Error('解析工作线程异常')); delete cadJobs[k];
+      });
+    };
+    return cadWorker;
   }
 
-  /* 缓存已实例化的 OCCT 引擎：首次导入完成 wasm 编译后复用之，后续导入 STEP/IGES 不再重复初始化 */
-  function getOcct() {
-    if (occtInst) return Promise.resolve(occtInst);
-    return loadOcct().then(function (factory) {
-      return factory({ locateFile: function (f) { return './lib/occt/' + f; } });
-    }).then(function (occt) {
-      occtInst = occt;
-      return occt;
+  /* Worker 只回传纯几何数据（transferable），THREE 构建仍在主线程（轻量），返回 Group 结构与原逻辑一致 */
+  function buildGroupFromMeshes(meshes, TH) {
+    var root = new TH.Group();
+    var mat = new TH.MeshStandardMaterial({ color: 0x9fb2c8, roughness: 0.55, metalness: 0.15, side: TH.DoubleSide });
+    meshes.forEach(function (m, i) {
+      var geo = new TH.BufferGeometry();
+      geo.setAttribute('position', new TH.Float32BufferAttribute(new Float32Array(m.position), 3));
+      if (m.normal && m.normal.byteLength) {
+        geo.setAttribute('normal', new TH.Float32BufferAttribute(new Float32Array(m.normal), 3));
+      } else {
+        geo.computeVertexNormals();
+      }
+      /* OCC 返回的 index 已规整为 Uint32，避免普通 Array 带病 */
+      if (m.index && m.index.byteLength) geo.setIndex(new TH.Uint32BufferAttribute(new Uint32Array(m.index), 1));
+      var mesh = new TH.Mesh(geo, mat);
+      mesh.name = m.name || ('零件 ' + (i + 1));
+      root.add(mesh);
     });
+    return root;
   }
 
   function parseCAD(buf, ext) {
     setStatus('正在载入 STEP / IGES 解析引擎（7.6MB，首次较慢）…');
-    return getOcct().then(function (occt) {
-      setStatus('正在解析几何体，请稍候…');
-      var data = new Uint8Array(buf);
-      var res = (ext === 'iges' || ext === 'igs') ? occt.ReadIgesFile(data, null) : occt.ReadStepFile(data, null);
-      if (!res || !res.success) throw new Error('OCC 解析失败（文件过大或几何异常）');
-      var TH = rm().TH;
-      var root = new TH.Group();
-      (res.meshes || []).forEach(function (m, i) {
-        var pos = m.attributes && m.attributes.position;
-        if (!pos) return;
-        var geo = new TH.BufferGeometry();
-        geo.setAttribute('position', new TH.Float32BufferAttribute(pos.array, 3));
-        if (m.attributes.normal) geo.setAttribute('normal', new TH.Float32BufferAttribute(m.attributes.normal.array, 3));
-        else geo.computeVertexNormals();
-        /* occt 返回的 index 可能是普通 Array，必须转成 TypedArray */
-        if (m.index && m.index.array) geo.setIndex(new TH.Uint32BufferAttribute(m.index.array, 1));
-        var mesh = new TH.Mesh(geo, new TH.MeshStandardMaterial({ color: 0x9fb2c8, roughness: 0.55, metalness: 0.15, side: TH.DoubleSide }));
-        mesh.name = m.name || ('零件 ' + (i + 1));
-        root.add(mesh);
-      });
-      if (!root.children.length) throw new Error('解析结果为空（没有可显示的面）');
-      return root;
+    return new Promise(function (resolve, reject) {
+      var cargo = {
+        id: ++cadJobId,
+        ext: ext,
+        buf: buf,
+        occtBase: new URL('./lib/occt/', location.href).href,
+      };
+      cadJobs[cargo.id] = { resolve: resolve, reject: reject };
+      getCadWorker().postMessage(cargo, [buf]);
     });
   }
 
