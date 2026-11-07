@@ -663,6 +663,16 @@ const ROBOTS = {
       { mod: 'launcher', school: '青岛大学 未来战队', team: '云台零件', item: '上板CNC / 云台侧板左右（DWG）', points: ['配套 CNC 图纸已随装配提供'] },
     ],
   },
+  import: {
+    name: '导入模型', en: 'IMPORT · LOCAL FILE', tag: '本地 3D 文件 · STEP / IGES / GLB / OBJ / STL',
+    color: '#8b95ff',
+    intro: '在浏览器本地导入 STEP / IGES / GLB / GLTF / OBJ / STL 文件，文件不上传服务器。导入后的展示方式与「未来战队整车」完全一致：自动按零件名分类成零件树、支持爆炸拆解、点击任意零件查看面数与包围盒尺寸。',
+    rules: { cal: '—', hp: '—', power: '—', heatCap: 230, perShot: 10, cool: 14, speed: '—', damage: '—', extra: '本地导入模型：仅供结构查看与拆解标注，不接入对抗逻辑' },
+    modules: [],
+    cases: [
+      { mod: 'chassis', school: '本地文件', team: '导入查看', item: 'STEP / IGES / GLB / GLTF / OBJ / STL', points: ['全部在本机解析，文件不会上传'] },
+    ],
+  },
 };
 
 const ROBOT_TYPES = Object.keys(ROBOTS);
@@ -688,13 +698,14 @@ const CUR = {
   mode: 'idle', explodeCur: 0, explodeTarget: 0,
   heat: 0, overheat: false, shotTimer: 0, shotIdx: 0, flashAge: 0,
   sel: null, selBoost: 0,
-  bots: { infantry: { turret: 0.45 }, sentry: { turret: 0.6 }, heavy: { turret: 0.55 }, qdu: { turret: 0.45 } },
+  bots: { infantry: { turret: 0.45 }, sentry: { turret: 0.6 }, heavy: { turret: 0.55 }, qdu: { turret: 0.45 }, import: { turret: 0.45 } },
   /* 装备库模块装载（每兵种独立记住四大模块选型，默认 = 出厂配置） */
   loadouts: {
     infantry: { chassis: 'ch-mec4', wheels: 'wl-mecanum', gimbal: 'gm-light', shooter: 'sh-17dual' },
     sentry:   { chassis: 'ch-mec4', wheels: 'wl-mecanum', gimbal: 'gm-auto',  shooter: 'sh-17auto' },
     heavy:    { chassis: 'ch-heavy', wheels: 'wl-steering', gimbal: 'gm-heavy', shooter: 'sh-42' },
     qdu:      {},
+    import:   {},
   },
 };
 
@@ -1283,6 +1294,7 @@ function buildCurrent() {
   if (CUR.root === 'infantry') buildInfantry();
   else if (CUR.root === 'sentry') buildSentry();
   else if (CUR.root === 'qdu') { if (window.__RMBuildQDU) window.__RMBuildQDU(); }
+  else if (CUR.root === 'import') { if (window.__RMImport) window.__RMImport.build(); }
   else buildHeavy();
   /* 结构细化钩子（排线 / 航插 / 灯带 / 电容等，由扩展片段注册） */
   if (window.__RMDetail) { try { window.__RMDetail(CUR.root); } catch (e) { console.warn('detail', e); } }
@@ -1716,7 +1728,9 @@ function startApp() {
       return;
     }
     const data = p.userData.data;
-    const md = ROBOTS[CUR.root].modules.find(x => x.name === data._modName);
+    const md = ROBOTS[CUR.root].modules.find(x => x.name === data._modName)
+      || ROBOTS[CUR.root].modules[0]
+      || { id: 'misc', name: '零件', color: '#8b95a8' };
     let html = '<div class="dmod" style="background:' + md.color + '">' + md.name.toUpperCase() + '</div>';
     html += '<div class="dn">' + data.name + '</div>';
     html += '<div class="ddesc">' + data.desc + '</div>';
@@ -3582,7 +3596,7 @@ window.ExtraViews = (function () {
   };
   function classify(name) {
     var n = (name || '').toLowerCase();
-    if (/螺丝|螺母|垫片|螺钉|螺栓|螺柱|screw|nut|washer|m[23456]_/.test(n)) return 'fastener';
+    if (/螺丝|螺母|垫片|螺钉|螺栓|螺柱|screw|nut|bolt|washer|m[23456]_/.test(n)) return 'fastener';
     if (/轮|麦|辊|胎|wheel|roller|hub|轮胎/.test(n)) return 'wheels';
     if (/枪|管|弹|拨|摩擦|shoot|barrel|bullet|fric|feeder|供弹/.test(n)) return 'shooter';
     if (/云台|yaw|pitch|gimbal|俯仰|侧板/.test(n)) return 'gimbal';
@@ -3649,10 +3663,28 @@ window.ExtraViews = (function () {
   };
 
   function buildReal(R, sceneSrc) {
+    mountModel(R, sceneSrc, {
+      robot: 'qdu', idPrefix: 'qdu',
+      school: '青岛大学 未来战队',
+      descPrefix: '真实整车装配零件（《整车装配.STEP》1:1 转换',
+      cadUp: true, tint: true,
+      pros: ['真实 CAD 件，非示意模型'],
+      done: function (n) {
+        if (R.showToast) R.showToast('整车 ' + n + ' 个零件已就绪，拖动「爆炸拆解」滑杆逐件散开');
+      },
+    });
+  }
+
+  /* ---------------- 通用模型挂载（整车 / 导入文件共用） ----------------
+     把任意 Object3D 转成「可点选零件 + 爆炸拆解 + 零件树」结构：
+     归一化尺寸与落地 → 逐 mesh 包装成 P() 零件组 → 按名称分类 → 回填模块树
+     opt = { robot, idPrefix, school, descPrefix, cadUp, tint, pros, done } */
+  function mountModel(R, src0, opt) {
     var TH = R.TH, CUR = R.CUR;
-    var src = sceneSrc.clone(true);
-    /* STEP（CAD）为 Z 轴向上，Three.js 为 Y 轴向上 → 绕 X 轴 -90° 转正，否则整车侧立 */
-    src.rotation.x = -Math.PI / 2;
+    var src = src0.clone(true);
+    /* STEP / IGES（CAD）为 Z 轴向上，Three.js 为 Y 轴向上 → 绕 X 轴 -90° 转正，否则整车侧立 */
+    if (opt.cadUp) src.rotation.x = -Math.PI / 2;
+    src.updateMatrixWorld(true);
     var bbox = new TH.Box3().setFromObject(src);
     var size = bbox.getSize(new TH.Vector3());
     var maxDim = Math.max(size.x, size.y, size.z) || 1;
@@ -3666,6 +3698,7 @@ window.ExtraViews = (function () {
     bbox.setFromObject(src);
     var center = bbox.getCenter(new TH.Vector3());
     var maxR = Math.max(size.x, size.z) * s * 0.5 || 0.2;
+    var token = CUR.R;   /* 异步标准件合并的时效校验 */
 
     var meshes = [];
     src.traverse(function (o) { if (o.isMesh) meshes.push(o); });
@@ -3675,6 +3708,7 @@ window.ExtraViews = (function () {
     var tinyGeo = [];
     var nameCnt = {};
     meshes.forEach(function (mesh, idx) {
+      if (!mesh.geometry || !mesh.geometry.attributes || !mesh.geometry.attributes.position) { mesh.visible = false; return; }
       mesh.geometry.computeBoundingBox();
       var gb = mesh.geometry.boundingBox;
       var gsize = gb.getSize(new TH.Vector3()).multiplyScalar(s);
@@ -3683,9 +3717,8 @@ window.ExtraViews = (function () {
       var rawName = (mesh.name || '').replace(/_\d+$/, '').trim();
       var gkey = classify(rawName);
       /* 微小标准件合并为一组，避免上千个零件拖垮零件树 */
-      if ((gkey === 'fastener' || (diag < 0.012 && tris < 400)) && tinyGeo !== null) {
-        var g = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
-        tinyGeo.push(g);
+      if (gkey === 'fastener' || (diag < 0.012 && tris < 400)) {
+        tinyGeo.push(mesh.geometry.clone().applyMatrix4(mesh.matrixWorld));
         mesh.visible = false;
         return;
       }
@@ -3697,51 +3730,346 @@ window.ExtraViews = (function () {
       var rLen = dir.length() || 0.001;
       var dist = 0.1 + 0.55 * Math.min(1, rLen / (maxR * 1.2));
       dir.normalize();
-      var key = 'qdu-' + idx;
+      var key = opt.idPrefix + '-' + idx;
       var part = R.P(CUR.R, key, [dir.x, dir.y, dir.z], dist);
       /* 共享几何 + 复制世界矩阵：零件组负责爆炸位移，mesh 保持原位姿 */
-      var m2 = new TH.Mesh(mesh.geometry, gm(R, gkey));
+      var mat0 = opt.tint ? gm(R, gkey) : safeMat(R, mesh.material, gkey);
+      var m2 = new TH.Mesh(mesh.geometry, mat0);
       mesh.matrixWorld.decompose(m2.position, m2.quaternion, m2.scale);
       part.add(m2);
       var data = {
         id: key, name: showName, color: GROUPS[gkey].color,
-        school: '青岛大学 未来战队',
-        desc: '真实整车装配零件（《整车装配.STEP》1:1 转换，归属：' + GROUPS[gkey].name + '）。',
+        school: opt.school || '',
+        desc: (opt.descPrefix || '导入模型零件') + '，归属：' + GROUPS[gkey].name + '）。',
         specs: ['三角面数：' + (tris | 0), '包围盒：' + (gsize.x * 1000).toFixed(0) + '×' + (gsize.y * 1000).toFixed(0) + '×' + (gsize.z * 1000).toFixed(0) + ' mm'],
-        pros: ['真实 CAD 件，非示意模型'], cons: [],
+        pros: (opt.pros || []).slice(), cons: [],
       };
       part.userData.data = data;
-      mods[gkey].push({ id: key, name: showName, color: data.color, desc: data.desc, specs: data.specs, pros: data.pros, cons: data.cons, school: data.school });
+      mods[gkey].push(data);
     });
     /* 标准件合并件 */
     if (tinyGeo.length) {
       import('three/addons/utils/BufferGeometryUtils.js').then(function (bu) {
-        try {
-          var merged = bu.mergeGeometries(tinyGeo, false);
-          var part = R.P(CUR.R, 'qdu-fasteners', [0, 1, 0], 0.5);
-          var mm = new TH.Mesh(merged, gm(R, 'fastener'));
-          part.add(mm);
-          var d = { id: 'qdu-fasteners', name: '标准件组（' + tinyGeo.length + ' 件）', color: GROUPS.fastener.color, school: '青岛大学 未来战队', desc: '螺丝 / 螺母 / 垫片等微小标准件的合并显示（保证零件树可用性）。', specs: ['合并零件数：' + tinyGeo.length], pros: ['真实装配紧固件'], cons: [] };
-          part.userData.data = d;
-          mods.fastener.push({ id: d.id, name: d.name, color: d.color, desc: d.desc, specs: d.specs, pros: d.pros, cons: d.cons, school: d.school });
-          part.userData.basePos = part.position.clone();
-          fillModules(R, mods);
-        } catch (e) { console.warn('fastener merge', e); }
+        if (CUR.R !== token) return;   /* 已切换兵种，丢弃过期合并 */
+        var merged = null;
+        try { merged = bu.mergeGeometries(tinyGeo, false); } catch (e) { console.warn('fastener merge', e); }
+        var part = R.P(CUR.R, opt.idPrefix + '-fasteners', [0, 1, 0], 0.5);
+        if (merged) part.add(new TH.Mesh(merged, gm(R, 'fastener')));
+        else tinyGeo.forEach(function (g) { part.add(new TH.Mesh(g, gm(R, 'fastener'))); });   /* 属性不一致时的降级 */
+        var d = { id: opt.idPrefix + '-fasteners', name: '标准件组（' + tinyGeo.length + ' 件）', color: GROUPS.fastener.color, school: opt.school || '', desc: '螺丝 / 螺母 / 垫片等微小标准件的合并显示（保证零件树可用性）。', specs: ['合并零件数：' + tinyGeo.length], pros: [], cons: [] };
+        part.userData.data = d;
+        mods.fastener.push(d);
+        part.userData.basePos = part.position.clone();
+        fillModules(R, opt.robot, mods);
+        if (R.renderList) R.renderList();
       });
     }
-    fillModules(R, mods);
+    fillModules(R, opt.robot, mods);
     /* 零件组 basePos（爆炸拆解基准） */
     CUR.parts.forEach(function (p) { p.userData.basePos = p.position.clone(); });
-    if (R.showToast) R.showToast('整车 ' + meshes.length + ' 个零件已就绪，拖动「爆炸拆解」滑杆逐件散开');
+    if (opt.done) opt.done(meshes.length);
   }
 
-  function fillModules(R, mods) {
-    var RBT = R.ROBOTS && R.ROBOTS.qdu;
+  /* 非分组配色时保留模型自身颜色；无 emissive 的材质（Basic）转标准材质，避免悬停/选中高亮失效 */
+  function safeMat(R, m, gkey) {
+    var TH = R.TH;
+    if (Array.isArray(m)) m = m[0];
+    if (m && m.emissive) return m;
+    if (m && m.color && !m.map && m.color.getHex() !== 0xffffff) {
+      return new TH.MeshStandardMaterial({ color: m.color.clone(), roughness: 0.55, metalness: 0.15, side: TH.DoubleSide });
+    }
+    return gm(R, gkey);
+  }
+
+  function fillModules(R, robot, mods) {
+    var RBT = R.ROBOTS && R.ROBOTS[robot];
     if (!RBT) return;
     RBT.modules = Object.keys(GROUPS)
       .filter(function (k) { return mods[k].length; })
       .map(function (k) { return { id: k, name: GROUPS[k].name + '（' + mods[k].length + '）', color: GROUPS[k].color, parts: mods[k] }; });
+    /* 详情面板按模块名反查 → 回填零件数据 */
+    var map = {};
+    RBT.modules.forEach(function (m) { m.parts.forEach(function (p) { map[p.id] = m.name; }); });
+    R.CUR.parts.forEach(function (g) {
+      var d = g.userData.data;
+      if (d && map[d.id]) d._modName = map[d.id];
+    });
   }
+
+  /* 供「导入模型」片段复用同一套展示管线 */
+  window.__RMCAD = { GROUPS: GROUPS, classify: classify, mount: mountModel };
+})();
+</script>
+<script>
+/* ================================================================
+   导入 3D 文件（STEP / STP / IGES / IGS / GLB / GLTF / OBJ / STL）
+   全部在本机解析，不上传；解析结果复用「未来战队整车」展示管线
+   （爆炸拆解 / 零件树 / 点击详情）
+================================================================ */
+(function () {
+  function rm() { return window.__RM; }
+  var state = { parsed: null, opts: null, name: '', parts: 0, loading: false };
+  var occtP = null;
+
+  /* ---------------- 样式 ---------------- */
+  var st = document.createElement('style');
+  st.textContent = [
+    '#impdrop{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:19;width:min(560px,74vw);display:none}',
+    '#impdrop .box{border:1.6px dashed rgba(120,180,255,.32);border-radius:16px;background:rgba(10,14,24,.9);',
+    'backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);padding:26px 28px;text-align:center;',
+    'transition:all .2s;box-shadow:0 16px 50px rgba(0,0,0,.5)}',
+    '#impdrop.over .box{border-color:var(--acc);background:rgba(30,80,120,.35);box-shadow:0 0 46px rgba(47,208,255,.28)}',
+    '#impdrop .ic{font-size:26px;line-height:1;margin-bottom:10px;opacity:.9}',
+    '#impdrop b{display:block;font-size:15px;color:#fff;letter-spacing:.06em;margin-bottom:6px}',
+    '#impdrop p{font-size:11.5px;color:var(--dim);line-height:1.8}',
+    '#impdrop .fmts{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin:12px 0 14px}',
+    '#impdrop .fmts span{font-size:10px;font-family:var(--mono);color:#9fd8ff;background:rgba(47,208,255,.1);',
+    'border:1px solid rgba(47,208,255,.24);border-radius:6px;padding:3px 7px}',
+    '#impdrop button{padding:9px 22px;border-radius:9px;border:1px solid var(--acc);cursor:pointer;font-family:inherit;',
+    'font-size:12.5px;letter-spacing:.1em;color:#04121a;background:linear-gradient(180deg,#5fdcff,#2fd0ff);font-weight:600}',
+    '#impdrop button:hover{filter:brightness(1.12)}',
+    '#impdrop .st{margin-top:12px;font-size:11.5px;color:#ffd08a;min-height:17px;line-height:1.6}',
+    '#impbar{position:absolute;left:50%;transform:translateX(-50%);bottom:76px;z-index:17;display:none;',
+    'align-items:center;gap:10px;padding:7px 10px 7px 14px;font-size:11.5px;color:#cfe0f2;max-width:88vw}',
+    '#impbar .fn{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#fff}',
+    '#impbar .tip{color:var(--dim);font-size:10.5px;white-space:nowrap}',
+    '#impbar button{padding:5px 12px;border-radius:7px;border:1px solid rgba(47,208,255,.35);background:rgba(47,208,255,.1);',
+    'color:var(--acc);font-size:11px;cursor:pointer;font-family:inherit;letter-spacing:.06em;white-space:nowrap}',
+    '#impbar button:hover{background:rgba(47,208,255,.22)}',
+  ].join('');
+  document.head.appendChild(st);
+
+  /* ---------------- DOM ---------------- */
+  var drop = document.createElement('div');
+  drop.id = 'impdrop';
+  drop.innerHTML =
+    '<div class="box">' +
+      '<div class="ic">⬆</div>' +
+      '<b>导入 3D 模型 · 浏览器本地解析</b>' +
+      '<p>把文件拖到页面任意位置，或点击下方按钮选择<br>文件不会上传，全部在本机解析</p>' +
+      '<div class="fmts"><span>STEP</span><span>IGES</span><span>GLB</span><span>GLTF</span><span>OBJ</span><span>STL</span></div>' +
+      '<button type="button">选择文件</button>' +
+      '<div class="st"></div>' +
+    '</div>';
+  document.body.appendChild(drop);
+
+  var bar = document.createElement('div');
+  bar.id = 'impbar';
+  bar.className = 'panel';
+  document.body.appendChild(bar);
+
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.step,.stp,.iges,.igs,.glb,.gltf,.obj,.stl';
+  input.style.display = 'none';
+  document.body.appendChild(input);
+
+  /* ---------------- 工具 ---------------- */
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  function extOf(n) { var m = /\.([a-z0-9]+)$/i.exec(n || ''); return m ? m[1].toLowerCase() : ''; }
+  function fmtSize(b) { return b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1024).toFixed(0) + ' KB'; }
+  function setStatus(t) { var s = drop.querySelector('.st'); if (s) s.textContent = t || ''; }
+
+  function sync() {
+    var R = rm(); if (!R) return;
+    var inImp = R.CUR.root === 'import';
+    var covered = (document.getElementById('viewwrap') || {}).style;
+    covered = covered && covered.display === 'block';
+    var showDrop = inImp && !covered && !state.parsed;
+    drop.style.display = showDrop ? 'block' : 'none';
+    bar.style.display = (inImp && !covered && state.parsed) ? 'flex' : 'none';
+    if (showDrop) { var h = document.getElementById('hint'); if (h) h.style.opacity = 0; }
+    if (bar.style.display === 'flex') renderBar();
+  }
+
+  function renderBar() {
+    bar.innerHTML = '<span class="fn">' + esc(state.name) + '</span>' +
+      '<span class="tip">' + (state.parts || 0) + ' 个零件 · 拖「爆炸拆解」逐件散开</span>' +
+      '<button type="button">更换文件</button>';
+    bar.querySelector('button').addEventListener('click', function () { input.click(); });
+  }
+
+  /* ---------------- 解析 ---------------- */
+  function loadOcct() {
+    if (window.occtimportjs) return Promise.resolve(window.occtimportjs);
+    if (occtP) return occtP;
+    occtP = new Promise(function (res, rej) {
+      var s = document.createElement('script');
+      s.src = './lib/occt/occt-import-js.js';
+      s.onload = function () { window.occtimportjs ? res(window.occtimportjs) : rej(new Error('occt-import-js 未导出')); };
+      s.onerror = function () { rej(new Error('occt-import-js.js 加载失败')); };
+      document.head.appendChild(s);
+    });
+    return occtP;
+  }
+
+  function parseCAD(buf, ext) {
+    setStatus('正在载入 STEP / IGES 解析引擎（7.6MB，首次较慢）…');
+    return loadOcct().then(function (factory) {
+      return factory({ locateFile: function (f) { return './lib/occt/' + f; } });
+    }).then(function (occt) {
+      setStatus('正在解析几何体，请稍候…');
+      var data = new Uint8Array(buf);
+      var res = (ext === 'iges' || ext === 'igs') ? occt.ReadIgesFile(data, null) : occt.ReadStepFile(data, null);
+      if (!res || !res.success) throw new Error('OCC 解析失败（文件过大或几何异常）');
+      var TH = rm().TH;
+      var root = new TH.Group();
+      (res.meshes || []).forEach(function (m, i) {
+        var pos = m.attributes && m.attributes.position;
+        if (!pos) return;
+        var geo = new TH.BufferGeometry();
+        geo.setAttribute('position', new TH.Float32BufferAttribute(pos.array, 3));
+        if (m.attributes.normal) geo.setAttribute('normal', new TH.Float32BufferAttribute(m.attributes.normal.array, 3));
+        else geo.computeVertexNormals();
+        /* occt 返回的 index 可能是普通 Array，必须转成 TypedArray */
+        if (m.index && m.index.array) geo.setIndex(new TH.Uint32BufferAttribute(m.index.array, 1));
+        var mesh = new TH.Mesh(geo, new TH.MeshStandardMaterial({ color: 0x9fb2c8, roughness: 0.55, metalness: 0.15, side: TH.DoubleSide }));
+        mesh.name = m.name || ('零件 ' + (i + 1));
+        root.add(mesh);
+      });
+      if (!root.children.length) throw new Error('解析结果为空（没有可显示的面）');
+      return root;
+    });
+  }
+
+  function parseMesh(buf, ext) {
+    if (ext === 'glb' || ext === 'gltf') {
+      return Promise.all([
+        import('three/addons/loaders/GLTFLoader.js'),
+        import('three/addons/loaders/DRACOLoader.js'),
+      ]).then(function (mods) {
+        var loader = new mods[0].GLTFLoader();
+        var draco = new mods[1].DRACOLoader();
+        draco.setDecoderPath('./lib/three/examples/jsm/libs/draco/');
+        loader.setDRACOLoader(draco);
+        return new Promise(function (res, rej) {
+          /* .gltf 是 JSON 文本，.glb 是二进制 */
+          var data = (ext === 'gltf') ? new TextDecoder().decode(buf) : buf;
+          loader.parse(data, '', function (gltf) {
+            try {
+              gltf.scene.traverse(function (o) {
+                if (!o.isMesh) return;
+                var as = gltf.parser.associations && gltf.parser.associations.get(o);
+                if (as && as.meshes !== undefined) {
+                  var mn = gltf.parser.json.meshes[as.meshes].name;
+                  if (mn) o.name = mn;
+                }
+              });
+            } catch (e) { /* 无 associations 时忽略 */ }
+            res(gltf.scene);
+          }, rej);
+        });
+      });
+    }
+    if (ext === 'obj') {
+      return import('three/addons/loaders/OBJLoader.js').then(function (m) {
+        return m.OBJLoader().parse(new TextDecoder().decode(buf));
+      });
+    }
+    if (ext === 'stl') {
+      return import('three/addons/loaders/STLLoader.js').then(function (m) {
+        var TH = rm().TH;
+        var geo = new m.STLLoader().parse(buf);
+        if (!geo.attributes.normal) geo.computeVertexNormals();
+        var mesh = new TH.Mesh(geo, new TH.MeshStandardMaterial({ color: 0x9fb2c8, roughness: 0.55, metalness: 0.15, side: TH.DoubleSide }));
+        mesh.name = 'STL 网格';
+        var g = new TH.Group();
+        g.add(mesh);
+        return g;
+      });
+    }
+    return Promise.reject(new Error('暂不支持 .' + ext + ' 格式'));
+  }
+
+  /* ---------------- 载入流程 ---------------- */
+  function load(file) {
+    var R = rm(); if (!R || state.loading) return;
+    var ext = extOf(file.name);
+    if (['step', 'stp', 'iges', 'igs', 'glb', 'gltf', 'obj', 'stl'].indexOf(ext) < 0) {
+      if (R.showToast) R.showToast('不支持的文件类型：.' + (ext || '?'));
+      return;
+    }
+    state.loading = true;
+    if (R.CUR.root !== 'import') R.switchRobot('import');
+    setTimeout(sync, 20);
+    setStatus('正在解析 ' + file.name + '（' + fmtSize(file.size) + '）…');
+    if (file.size > 120 * 1048576 && /step|stp|iges|igs/.test(ext)) {
+      setStatus('文件较大，浏览器端解析可能失败（建议 STEP < 50MB）…');
+    }
+    file.arrayBuffer().then(function (buf) {
+      return (ext === 'step' || ext === 'stp' || ext === 'iges' || ext === 'igs')
+        ? parseCAD(buf, ext) : parseMesh(buf, ext);
+    }).then(function (obj) {
+      var cad = /step|stp|iges|igs/.test(ext);
+      state.parsed = obj;
+      state.name = file.name;
+      state.opts = {
+        robot: 'import', idPrefix: 'imp',
+        school: '本地文件 · ' + file.name,
+        descPrefix: '本地导入零件（' + file.name + ' 解析，未做任何修改',
+        cadUp: cad, tint: cad,
+        pros: ['本地解析，文件未上传服务器'],
+        done: function (n) { state.parts = n; },
+      };
+      state.loading = false;
+      R.ROBOTS.import.intro = '已导入「' + file.name + '」（' + fmtSize(file.size) + '）：每个零件独立可点选，拖「爆炸拆解」滑杆可逐件散开，点击零件查看面数与包围盒尺寸。';
+      if (R.CUR.root !== 'import') R.switchRobot('import'); else R.rebuild();
+      setTimeout(function () { sync(); }, 60);
+      if (R.showToast) R.showToast('已导入：' + file.name);
+      setStatus('');
+    }).catch(function (err) {
+      state.loading = false;
+      console.warn('import', err);
+      var msg = '解析失败：' + ((err && err.message) || err);
+      if (R.CUR.root !== 'import') R.switchRobot('import');
+      setTimeout(function () { sync(); setStatus(msg); }, 30);
+      if (R.showToast) R.showToast(msg);
+    });
+  }
+
+  /* ---------------- 展示管线 ---------------- */
+  function build() {
+    var R = rm(); if (!R) return;
+    if (!state.parsed) return;          /* 空场景 + 拖拽区 */
+    if (!window.__RMCAD) return;
+    window.__RMCAD.mount(R, state.parsed, state.opts);
+  }
+  window.__RMImport = { build: build };
+
+  /* ---------------- 交互 ---------------- */
+  drop.querySelector('button').addEventListener('click', function () { input.click(); });
+  input.addEventListener('change', function () {
+    if (input.files && input.files[0]) load(input.files[0]);
+    input.value = '';
+  });
+
+  function hasFiles(e) {
+    var t = e.dataTransfer && e.dataTransfer.types;
+    return t && Array.prototype.indexOf.call(t, 'Files') >= 0;
+  }
+  window.addEventListener('dragover', function (e) { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('dragenter', function (e) { if (hasFiles(e) && drop.style.display === 'block') drop.classList.add('over'); });
+  window.addEventListener('dragleave', function (e) { if (e.target === document.documentElement) drop.classList.remove('over'); });
+  window.addEventListener('drop', function (e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    drop.classList.remove('over');
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
+  });
+
+  function boot() {
+    if (!window.__RM) { setTimeout(boot, 150); return; }
+    var rb = document.getElementById('rbots');
+    var av = document.getElementById('appviews');
+    if (rb) rb.addEventListener('click', function () { setTimeout(sync, 30); });
+    if (av) av.addEventListener('click', function () { setTimeout(sync, 30); });
+    sync();
+  }
+  boot();
 })();
 </script>
 </body>
