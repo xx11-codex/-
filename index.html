@@ -211,16 +211,16 @@ async function loadThree() {
   for (const cdn of CDNS) {
     try {
       setImportMap(cdn);
-      const THREE = await import(/* @vite-ignore */ 'three');
-      const { OrbitControls } = await import('three/addons/controls/OrbitControls.js');
-      let RoomEnvironment = null;
-      try { RoomEnvironment = (await import('three/addons/environments/RoomEnvironment.js')).RoomEnvironment; }
-      catch (e) { console.warn('RoomEnvironment 载入失败', e); }
-      const { GLTFLoader: GLTF } = await import('three/addons/loaders/GLTFLoader.js');
-      let DRACO = null;
-      try { DRACO = (await import('three/addons/loaders/DRACOLoader.js')).DRACOLoader; }
-      catch (e) { console.warn('DRACOLoader 载入失败', e); }
-      return { THREE, OrbitControls, RoomEnvironment, GLTFLoader: GLTF, DRACOLoader: DRACO, cdn: cdn.name };
+      const [THREE, oc, gltf] = await Promise.all([
+        import(/* @vite-ignore */ 'three'),
+        import('three/addons/controls/OrbitControls.js'),
+        import('three/addons/loaders/GLTFLoader.js'),
+      ]);
+      const [RoomEnvironment, DRACO] = await Promise.all([
+        import('three/addons/environments/RoomEnvironment.js').then(m => m.RoomEnvironment).catch(e => { console.warn('RoomEnvironment 载入失败', e); return null; }),
+        import('three/addons/loaders/DRACOLoader.js').then(m => m.DRACOLoader).catch(e => { console.warn('DRACOLoader 载入失败', e); return null; }),
+      ]);
+      return { THREE, OrbitControls: oc.OrbitControls, RoomEnvironment, GLTFLoader: gltf.GLTFLoader, DRACOLoader: DRACO, cdn: cdn.name };
     } catch (e) { lastErr = e; console.warn('CDN 尝试失败:', cdn.name, e); }
   }
   throw lastErr || new Error('all CDN failed');
@@ -1721,11 +1721,12 @@ function startApp() {
       '<div class="re">' + bits.en + '</div><div class="rn">' + bits.name + '</div><div class="rd">' + bits.intro + '</div>';
     const cont = $('#plist');
     cont.innerHTML = '';
+    const frag = document.createDocumentFragment();
     bits.modules.forEach(md => {
       const mh = el('div', 'mod-head', '<span class="sw" style="background:' + md.color + '"></span><span class="mn">' + md.name + '</span><span class="mc">' + md.parts.length + ' 件</span>');
-      cont.appendChild(mh);
+      frag.appendChild(mh);
       const wrap = el('div', 'mod-wrap');
-      cont.appendChild(wrap);
+      frag.appendChild(wrap);
       const seen = new Set();
       md.parts.forEach(p => {
         if (seen.has(p.id)) return;
@@ -1750,6 +1751,7 @@ function startApp() {
         wrap.style.display = wrap.style.display === 'none' ? 'block' : 'none';
       });
     });
+    cont.appendChild(frag);
   }
   function ruleLines(modId, pid) {
     const r = ROBOTS[CUR.root].rules;
@@ -3791,7 +3793,7 @@ window.ExtraViews = (function () {
     var nameCnt = {};
     meshes.forEach(function (mesh, idx) {
       if (!mesh.geometry || !mesh.geometry.attributes || !mesh.geometry.attributes.position) { mesh.visible = false; return; }
-      mesh.geometry.computeBoundingBox();
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
       var gb = mesh.geometry.boundingBox;
       var gsize = gb.getSize(new TH.Vector3()).multiplyScalar(s);
       var diag = gsize.length();
