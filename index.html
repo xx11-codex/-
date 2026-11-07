@@ -657,17 +657,20 @@ const ROBOTS = {
     ],
   },
   qdu: {
-    name: '未来战队全向轮步兵', en: 'QDU FUTURE · OMNI INFANTRY', tag: '青岛大学 未来战队 · 全向轮步兵',
+    name: '未来战队整车', en: 'QDU FUTURE · REAL CAD', tag: '青岛大学 未来战队 · STEP 实车',
     color: '#37e0b0',
-    intro: '青岛大学未来战队全向轮步兵：四麦轮全向底盘 + 双轴云台 + 17mm 双管摩擦轮发射机构 + 四向装甲，与标准步兵同构，是训练与对抗的完整机型。',
-    rules: { cal: '17mm', hp: '300 / 350', power: '90W / 75W', heatCap: 230, perShot: 10, cool: 14, speed: '≤ 25 m/s', damage: '20 / 发', extra: '全向轮步兵：结构与标准步兵一致，17mm 弹丸法向速度须大于 12 m/s 才判定命中' },
+    intro: '青岛大学未来战队真实整车装配模型：由 229MB《整车装配.STEP》1:1 转换，每个零件都是真实机加 / 打印件。拖「爆炸拆解」滑杆可逐件散开，点击任意零件查看其名称与归属战队。',
+    rules: { cal: '17mm', hp: '实车', power: '实车', heatCap: 230, perShot: 10, cool: 14, speed: '—', damage: '—', extra: '真实整车模型：仅供结构展示与拆解标注，不接入对抗逻辑' },
     modules: [],
-    cases: [],
+    cases: [
+      { mod: 'chassis', school: '青岛大学 未来战队', team: '整车装配', item: '整车装配.STEP（约 2000 零件）', points: ['真实 CAD 装配体 1:1 转换，零件名保留用于拆解标注'] },
+      { mod: 'launcher', school: '青岛大学 未来战队', team: '云台零件', item: '上板CNC / 云台侧板左右（DWG）', points: ['配套 CNC 图纸已随装配提供'] },
+    ],
   },
   import: {
     name: '导入模型', en: 'IMPORT · LOCAL FILE', tag: '本地 3D 文件 · STEP / IGES / GLB / OBJ / STL',
     color: '#8b95ff',
-    intro: '在浏览器本地导入 STEP / IGES / GLB / GLTF / OBJ / STL 文件，文件不上传服务器。导入后自动按零件名分类成零件树、支持爆炸拆解、点击任意零件查看面数与包围盒尺寸。',
+    intro: '在浏览器本地导入 STEP / IGES / GLB / GLTF / OBJ / STL 文件，文件不上传服务器。导入后的展示方式与「未来战队整车」完全一致：自动按零件名分类成零件树、支持爆炸拆解、点击任意零件查看面数与包围盒尺寸。',
     rules: { cal: '—', hp: '—', power: '—', heatCap: 230, perShot: 10, cool: 14, speed: '—', damage: '—', extra: '本地导入模型：仅供结构查看与拆解标注，不接入对抗逻辑' },
     modules: [],
     cases: [
@@ -675,12 +678,6 @@ const ROBOTS = {
     ],
   },
 };
-
-/* 未来战队全向轮步兵：复用步兵的模块/零件结构（拆解、改色、查详情与步兵一致） */
-ROBOTS.qdu.modules = JSON.parse(JSON.stringify(ROBOTS.infantry.modules));
-ROBOTS.qdu.cases = [
-  { mod: 'chassis', school: '青岛大学 未来战队', team: '全向轮步兵', item: '四麦轮全向底盘 + 双轴云台 + 17mm 双管发射机构', points: ['与标准步兵同构，支持拆解 / 改色 / 对抗射击'] },
-];
 
 const ROBOT_TYPES = Object.keys(ROBOTS);
 /* ================================================================
@@ -711,7 +708,7 @@ const CUR = {
     infantry: { chassis: 'ch-mec4', wheels: 'wl-mecanum', gimbal: 'gm-light', shooter: 'sh-17dual' },
     sentry:   { chassis: 'ch-mec4', wheels: 'wl-mecanum', gimbal: 'gm-auto',  shooter: 'sh-17auto' },
     heavy:    { chassis: 'ch-heavy', wheels: 'wl-steering', gimbal: 'gm-heavy', shooter: 'sh-42' },
-    qdu:      { chassis: 'ch-mec4', wheels: 'wl-mecanum', gimbal: 'gm-light', shooter: 'sh-17dual' },
+    qdu:      {},
     import:   {},
   },
 };
@@ -1303,7 +1300,7 @@ function buildHeavy() {
 function buildCurrent() {
   if (CUR.root === 'infantry') buildInfantry();
   else if (CUR.root === 'sentry') buildSentry();
-  else if (CUR.root === 'qdu') buildInfantry();
+  else if (CUR.root === 'qdu') { if (window.__RMBuildQDU) window.__RMBuildQDU(); }
   else if (CUR.root === 'import') { if (window.__RMImport) window.__RMImport.build(); }
   else buildHeavy();
   /* 结构细化钩子（排线 / 航插 / 灯带 / 电容等，由扩展片段注册） */
@@ -3148,7 +3145,7 @@ window.ExtraViews = (function () {
       var R = rm(); if (!R) return '3D 引擎尚未就绪，请稍候再试';
       var m = META[partId]; if (!m) return '未知模块：' + partId;
       var root = R.CUR.root, type = m.type;
-      if (root === 'qdu') return '未来战队全向轮步兵暂不支持换装';
+      if (root === 'qdu') return '真实整车模型为展示 / 拆解用途，不支持换装';
       if (root !== 'heavy' && HEAVY_ONLY[partId]) return '「' + m.name + '」为重装专属模块，请切换至重装机器人再装机';
       if (root === 'heavy' && !HEAVY_ONLY[partId] && type !== 'wheels') return '重装机器人必须保持 重装底盘 + 重型云台 + 42mm 发射机构（轮系可换）';
       R.CUR.loadouts[root][type] = partId;
@@ -3888,7 +3885,7 @@ window.ExtraViews = (function () {
 <script>
 /* ================================================================
    导入 3D 文件（STEP / STP / IGES / IGS / GLB / GLTF / OBJ / STL）
-   全部在本机解析，不上传；解析结果复用本地 CAD 展示管线
+   全部在本机解析，不上传；解析结果复用「未来战队整车」展示管线
    （爆炸拆解 / 零件树 / 点击详情）
 ================================================================ */
 (function () {
