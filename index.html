@@ -3206,8 +3206,15 @@ window.ExtraViews = (function () {
     if (realLoading[mode]) return;
     realLoading[mode] = true;
     R.showToast(cfg.label + ' 加载中…');
-    import('three/addons/loaders/GLTFLoader.js').then(function (mod) {
-      new mod.GLTFLoader().load(cfg.url, function (gltf) {
+    Promise.all([
+      import('three/addons/loaders/GLTFLoader.js'),
+      import('three/addons/loaders/DRACOLoader.js'),
+    ]).then(function (mods) {
+      var loader = new mods[0].GLTFLoader();
+      var draco = new mods[1].DRACOLoader();
+      draco.setDecoderPath('./lib/three/examples/jsm/libs/draco/');
+      loader.setDRACOLoader(draco);
+      loader.load(cfg.url, function (gltf) {
         var sc = gltf.scene;
         /* cascadio 未导出 metallicFactor/roughnessFactor，glTF 默认 metallic=1 会发黑；
            且场景强光+白色材质易过曝发白。改用不受光的基础材质，精确复现官方红/蓝/白配色 */
@@ -3606,8 +3613,15 @@ window.ExtraViews = (function () {
       };
       if (!failMsg && !loading) {
         loading = true;
-        import('three/addons/loaders/GLTFLoader.js').then(function (mod) {
-          new mod.GLTFLoader().load(GLB_URL, function (gltf) {
+        Promise.all([
+          import('three/addons/loaders/GLTFLoader.js'),
+          import('three/addons/loaders/DRACOLoader.js'),
+        ]).then(function (mods) {
+          var loader = new mods[0].GLTFLoader();
+          var draco = new mods[1].DRACOLoader();
+          draco.setDecoderPath('./lib/three/examples/jsm/libs/draco/');
+          loader.setDRACOLoader(draco);
+          loader.load(GLB_URL, function (gltf) {
             /* 零件名：node 名为 NAUO 内部名，mesh 定义名才是中文零件名 → 回填 */
             try {
               gltf.scene.traverse(function (o) {
